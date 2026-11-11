@@ -1,0 +1,48 @@
+[package]
+name = "borght-reclaim"
+version = "0.1.0"
+edition = "2021"
+description = "Fast disk usage analyzer for Windows dev drives that also cleans up, without touching active work"
+authors = ["Koen van der Borght"]
+license = "MIT"
+repository = "https://github.com/borght-dev/borght-reclaim"
+readme = "README.md"
+keywords = ["disk-usage", "treemap", "cleanup", "windows", "refs"]
+categories = ["command-line-utilities", "filesystem", "visualization"]
+exclude = ["design/", "docs/"]
+
+[[bin]]
+name = "reclaim"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+
+[profile.dev]
+opt-level = 1

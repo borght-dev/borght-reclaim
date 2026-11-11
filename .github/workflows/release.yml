@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test
+      - name: Build
+        run: cargo build --release
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash target/release/reclaim.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  reclaim.exe" | Set-Content target/release/reclaim.exe.sha256
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" target/release/reclaim.exe target/release/reclaim.exe.sha256 --title "${{ github.ref_name }}" --generate-notes
