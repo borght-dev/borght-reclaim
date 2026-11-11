@@ -72,7 +72,7 @@ impl TreemapView {
         paint_labels(&painter, tree, cache);
 
         if let Some(tile) = focused.and_then(|node| nearest_tile(tree, cache, node)) {
-            let outline = Stroke::new(2.0, Color32::WHITE);
+            let outline = Stroke::new(2.0_f32, Color32::WHITE);
             painter.rect_stroke(to_rect(tile.area), 0.0, outline, StrokeKind::Inside);
         }
 
@@ -80,7 +80,7 @@ impl TreemapView {
             .hover_pos()
             .and_then(|at| cache.tiles.iter().rev().find(|tile| tile.area.contains(at.x, at.y)));
         if let Some(tile) = hovered {
-            let outline = Stroke::new(1.0, Color32::from_white_alpha(200));
+            let outline = Stroke::new(1.0_f32, Color32::from_white_alpha(200));
             painter.rect_stroke(to_rect(tile.area), 0.0, outline, StrokeKind::Inside);
             let node = tile.node;
             response.clone().on_hover_ui_at_pointer(|ui| describe(ui, tree, node, ratings));

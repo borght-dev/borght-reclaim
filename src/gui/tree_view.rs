@@ -226,7 +226,7 @@ fn paint_header(ui: &mut Ui) {
     right_title(columns.frees, "FREES");
     right_title(columns.files, "FILES");
     right_title(columns.modified, "CHANGED");
-    painter.hline(rect.x_range(), rect.bottom(), Stroke::new(1.0, theme::BORDER));
+    painter.hline(rect.x_range(), rect.bottom(), Stroke::new(1.0_f32, theme::BORDER));
 }
 
 struct RowState {
