@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Worktrees with submodules can be removed. Git refuses those unless forced, so Reclaim first checks every submodule, deinitialised ones included, for uncommitted files, stashes and commits no remote has
+
 ## 0.1.0
 
 First public version.

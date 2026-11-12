@@ -117,6 +117,9 @@ pub struct WorktreeState {
     /// Another local branch that already contains this worktree's commit.
     pub containing_local_branch: Option<String>,
     pub ignored_local_files: Vec<String>,
+    /// Submodule repositories live inside the worktree's git directory and go with it.
+    pub has_submodules: bool,
+    pub submodule_work: Option<String>,
 }
 
 /// Where a worktree's commits remain once the worktree itself is removed.
@@ -147,6 +150,9 @@ impl WorktreeState {
     }
 
     pub fn local_changes(&self) -> Option<String> {
+        if let Some(work) = &self.submodule_work {
+            return Some(work.clone());
+        }
         if self.uncommitted_changes > 0 {
             return Some(format!("{} uncommitted changes", self.uncommitted_changes));
         }
@@ -210,10 +216,19 @@ fn list_merged_pull_requests(repository: &Path, filter: &[&str]) -> MergedPullRe
 pub fn inspect_worktree(worktree: &Path) -> io::Result<WorktreeState> {
     let status = succeeded(
         git(worktree)
-            .args(["status", "--porcelain=v2", "--branch", "--untracked-files=normal"])
+            .args([
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--untracked-files=normal",
+                "--ignore-submodules=none",
+            ])
             .output()?,
     )?;
     let mut state = parse_status(&status);
+    let submodules = Submodules::of(worktree)?;
+    state.has_submodules = submodules.exist();
+    state.submodule_work = submodules.unsaved_work(worktree)?;
     if state.unpushed_commits.is_none() {
         let remote_branches = succeeded(
             git(worktree)
@@ -239,14 +254,21 @@ pub fn inspect_worktree(worktree: &Path) -> io::Result<WorktreeState> {
             .find(|&branch| Some(branch) != state.branch.as_deref())
             .map(str::to_string);
     }
+    state.ignored_local_files = ignored_local_files(worktree)?;
+    for checkout in &submodules.checkouts {
+        let inside = ignored_local_files(&worktree.join(checkout))?;
+        state.ignored_local_files.extend(inside.iter().map(|path| format!("{checkout}/{path}")));
+    }
+    Ok(state)
+}
+
+fn ignored_local_files(repository: &Path) -> io::Result<Vec<String>> {
     let ignored = succeeded(
-        git(worktree)
+        git(repository)
             .args(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"])
             .output()?,
     )?;
-    state.ignored_local_files =
-        ignored.lines().filter(|path| !is_disposable(path)).map(str::to_string).collect();
-    Ok(state)
+    Ok(ignored.lines().filter(|path| !is_disposable(path)).map(str::to_string).collect())
 }
 
 /// What deleting a whole repository folder would destroy. Unlike removing a worktree this
@@ -258,16 +280,105 @@ pub fn repository_blocker(repository: &Path) -> io::Result<Option<String>> {
     if let Some(changes) = parse_status(&status).local_changes() {
         return Ok(Some(changes));
     }
+    history_blocker(|| git(repository))
+}
+
+fn history_blocker(git: impl Fn() -> Command) -> io::Result<Option<String>> {
     let local_only = succeeded(
-        git(repository)
+        git()
             .args(["rev-list", "--count", "--branches", "--tags", "HEAD", "--not", "--remotes"])
             .output()?,
     )?;
     if local_only.trim() != "0" {
         return Ok(Some(format!("{} commits that no remote has", local_only.trim())));
     }
-    let stashes = succeeded(git(repository).args(["stash", "list"]).output()?)?;
+    let stashes = succeeded(git().args(["stash", "list"]).output()?)?;
     Ok((!stashes.trim().is_empty()).then(|| format!("{} stashes", stashes.lines().count())))
+}
+
+/// A linked worktree keeps its submodule repositories under its own git directory, so they
+/// are deleted with it.
+struct Submodules {
+    /// Checked-out submodules at any depth, relative to the worktree.
+    checkouts: Vec<String>,
+    /// Every repository under `modules`, including ones whose checkout was deinitialised.
+    stores: Vec<PathBuf>,
+    modules: PathBuf,
+}
+
+impl Submodules {
+    fn of(worktree: &Path) -> io::Result<Self> {
+        let git_directory = PathBuf::from(
+            succeeded(git(worktree).args(["rev-parse", "--absolute-git-dir"]).output()?)?.trim(),
+        );
+        let modules = git_directory.join("modules");
+        if !worktree.join(".gitmodules").exists() && !modules.exists() {
+            return Ok(Self { checkouts: Vec::new(), stores: Vec::new(), modules });
+        }
+        Ok(Self {
+            checkouts: populated_submodules(worktree)?,
+            stores: submodule_stores(&modules),
+            modules,
+        })
+    }
+
+    fn exist(&self) -> bool {
+        !self.checkouts.is_empty() || !self.stores.is_empty()
+    }
+
+    /// As with a whole repository folder, anything a submodule holds that no remote has counts.
+    fn unsaved_work(&self, worktree: &Path) -> io::Result<Option<String>> {
+        for checkout in &self.checkouts {
+            if let Some(work) = repository_blocker(&worktree.join(checkout))? {
+                return Ok(Some(format!("submodule {checkout} has {work}")));
+            }
+        }
+        for store in &self.stores {
+            if let Some(work) = history_blocker(|| store_git(store))? {
+                let name = store.strip_prefix(&self.modules).unwrap_or(store);
+                let name = name.to_string_lossy().replace('\\', "/");
+                return Ok(Some(format!("submodule repository {name} has {work}")));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Checked-out submodules at any depth, as paths relative to `repository`.
+fn populated_submodules(repository: &Path) -> io::Result<Vec<String>> {
+    let staged = succeeded(git(repository).args(["ls-files", "-z", "--stage"]).output()?)?;
+    let mut populated = Vec::new();
+    for entry in staged.split('\0') {
+        let Some((metadata, path)) = entry.split_once('\t') else { continue };
+        if !metadata.starts_with("160000 ") || !repository.join(path).join(".git").exists() {
+            continue;
+        }
+        let nested = populated_submodules(&repository.join(path))?;
+        populated.push(path.to_string());
+        populated.extend(nested.into_iter().map(|inner| format!("{path}/{inner}")));
+    }
+    Ok(populated)
+}
+
+/// Git directories under `modules`, nested ones included; names may contain slashes.
+fn submodule_stores(modules: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(modules) else { return Vec::new() };
+    let mut stores = Vec::new();
+    for directory in entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()) {
+        if directory.join("HEAD").is_file() && directory.join("objects").is_dir() {
+            stores.extend(submodule_stores(&directory.join("modules")));
+            stores.push(directory);
+        } else {
+            stores.extend(submodule_stores(&directory));
+        }
+    }
+    stores
+}
+
+fn store_git(store: &Path) -> Command {
+    let mut command = git(store);
+    command.arg("--git-dir=.");
+    command
 }
 
 fn parse_status(status: &str) -> WorktreeState {
@@ -318,9 +429,20 @@ pub fn ignored_untracked(workspace: &Path, paths: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Never forced: git itself refuses when the worktree is dirty or locked.
-pub fn remove_worktree(repository: &Path, worktree: &Path) -> io::Result<()> {
-    succeeded(git(repository).args(["worktree", "remove"]).arg(worktree).output()?).map(|_| ())
+/// Git refuses any worktree with submodules unless forced, and a single force skips its own
+/// clean check while still refusing a locked worktree. So `with_submodules` must only be passed
+/// right after [`inspect_worktree`] found no local changes, submodule work included.
+pub fn remove_worktree(
+    repository: &Path,
+    worktree: &Path,
+    with_submodules: bool,
+) -> io::Result<()> {
+    let mut command = git(repository);
+    command.args(["worktree", "remove"]);
+    if with_submodules {
+        command.arg("--force");
+    }
+    succeeded(command.arg(worktree).output()?).map(|_| ())
 }
 
 #[cfg(test)]
@@ -379,6 +501,7 @@ mod tests {
             .arg("-C")
             .arg(directory)
             .args(["-c", "user.name=test", "-c", "user.email=test@example.invalid"])
+            .args(["-c", "protocol.file.allow=always"])
             .args(arguments)
             .output()
             .unwrap();
@@ -435,6 +558,95 @@ mod tests {
         assert_eq!(before_integration.safekeeping(), Safekeeping::OwnBranchOnly);
         assert!(matches!(after_integration.safekeeping(), Safekeeping::OtherLocalBranch(_)));
         assert_eq!(after_integration.blocker(), None);
+    }
+
+    fn commit_file(repository: &Path, name: &str) {
+        std::fs::write(repository.join(name), name).unwrap();
+        run_git(repository, &["add", "."]);
+        run_git(repository, &["commit", "--quiet", "-m", name]);
+    }
+
+    /// A pushed worktree of `app` with `lib` checked out at `vendor/lib`.
+    fn worktree_with_submodule(root: &Path) -> (PathBuf, PathBuf) {
+        let library = root.join("lib");
+        let repository = root.join("app");
+        for directory in [&library, &repository] {
+            std::fs::create_dir_all(directory).unwrap();
+            run_git(directory, &["init", "--quiet"]);
+            commit_file(directory, "readme.md");
+        }
+        run_git(&repository, &["submodule", "add", "--quiet", "../lib", "vendor/lib"]);
+        run_git(&repository, &["commit", "--quiet", "-m", "add submodule"]);
+        let worktree = root.join("wt");
+        run_git(&repository, &["worktree", "add", "--quiet", "--detach", "../wt"]);
+        run_git(&worktree, &["submodule", "update", "--init", "--quiet"]);
+        (repository, worktree)
+    }
+
+    #[test]
+    fn clean_worktree_with_submodule_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let (repository, worktree) = worktree_with_submodule(root.path());
+
+        let state = inspect_worktree(&worktree).unwrap();
+        run_git(&repository, &["worktree", "lock", "../wt"]);
+        let locked = remove_worktree(&repository, &worktree, state.has_submodules);
+        run_git(&repository, &["worktree", "unlock", "../wt"]);
+
+        assert!(state.has_submodules);
+        assert_eq!(state.local_changes(), None);
+        assert_eq!(state.ignored_local_files, Vec::<String>::new());
+        assert!(remove_worktree(&repository, &worktree, false).is_err(), "git refuses unforced");
+        assert!(locked.is_err(), "a lock still holds");
+        remove_worktree(&repository, &worktree, state.has_submodules).unwrap();
+        assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn work_inside_a_submodule_blocks_worktree_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, worktree) = worktree_with_submodule(root.path());
+        let submodule = worktree.join("vendor/lib");
+
+        std::fs::write(submodule.join("draft.md"), "draft").unwrap();
+        let untracked = inspect_worktree(&worktree).unwrap().local_changes();
+        run_git(&submodule, &["add", "."]);
+        run_git(&submodule, &["stash", "--quiet"]);
+        let stashed = inspect_worktree(&worktree).unwrap().local_changes();
+        std::fs::write(submodule.join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(submodule.join(".env"), "secret").unwrap();
+        run_git(&submodule, &["add", ".gitignore"]);
+        let with_local_settings = inspect_worktree(&worktree).unwrap();
+        assert_eq!(with_local_settings.ignored_local_files, ["vendor/lib/.env"]);
+        run_git(&submodule, &["stash", "drop", "--quiet"]);
+        commit_file(&submodule, "feature.md");
+        run_git(&worktree, &["commit", "--quiet", "-am", "bump submodule"]);
+        let unpushed = inspect_worktree(&worktree).unwrap();
+
+        assert_eq!(untracked.as_deref(), Some("submodule vendor/lib has 1 untracked files"));
+        assert_eq!(stashed.as_deref(), Some("submodule vendor/lib has 1 stashes"));
+        assert_eq!(unpushed.uncommitted_changes, 0, "the parent itself is clean");
+        assert_eq!(
+            unpushed.blocker().as_deref(),
+            Some("submodule vendor/lib has 1 commits that no remote has")
+        );
+    }
+
+    #[test]
+    fn deinitialised_submodule_store_still_blocks_with_unpushed_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, worktree) = worktree_with_submodule(root.path());
+        commit_file(&worktree.join("vendor/lib"), "feature.md");
+        run_git(&worktree, &["commit", "--quiet", "-am", "bump submodule"]);
+        run_git(&worktree, &["submodule", "deinit", "--quiet", "--force", "--all"]);
+
+        let state = inspect_worktree(&worktree).unwrap();
+
+        assert!(state.has_submodules);
+        assert_eq!(
+            state.local_changes().as_deref(),
+            Some("submodule repository vendor/lib has 1 commits that no remote has")
+        );
     }
 
     #[test]

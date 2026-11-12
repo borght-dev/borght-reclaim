@@ -223,16 +223,15 @@ impl Cleaner<'_> {
         if let Err(refusal) = deletable_within(self.scan_root, worktree) {
             return Outcome::Skipped(refusal);
         }
-        match git::inspect_worktree(worktree) {
+        let state = match git::inspect_worktree(worktree) {
             Err(error) => return Outcome::Failed(format!("git could not inspect it: {error}")),
-            Ok(state) => {
-                if let Some(changes) = state.local_changes() {
-                    return Outcome::Skipped(format!("no longer removable: {changes}"));
-                }
-                if state.head != verified_head {
-                    return Outcome::Skipped("it has new commits since the analysis".to_string());
-                }
-            }
+            Ok(state) => state,
+        };
+        if let Some(changes) = state.local_changes() {
+            return Outcome::Skipped(format!("no longer removable: {changes}"));
+        }
+        if state.head != verified_head {
+            return Outcome::Skipped("it has new commits since the analysis".to_string());
         }
         for generated in regenerable {
             if let Outcome::Skipped(reason) | Outcome::Failed(reason) = self.remove(generated) {
@@ -241,7 +240,7 @@ impl Cleaner<'_> {
                 }
             }
         }
-        match git::remove_worktree(repository, worktree) {
+        match git::remove_worktree(repository, worktree, state.has_submodules) {
             Ok(()) => Outcome::Removed,
             Err(error) => Outcome::Failed(format!("git worktree remove: {error}")),
         }

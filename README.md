@@ -41,7 +41,7 @@ Every item gets one of three ratings.
 - A process whose working directory or command line points into a workspace blocks that workspace.
 - A workspace with a file modified in the last 30 minutes is active. Nothing in it is offered.
 - Build output is rated safe only after the workspace sat idle for 6 hours. Dependencies need 7 days.
-- A worktree is offered only when `git status` is clean and every commit is also on a remote or on another local branch. Reclaim records the commit it verified, and skips the worktree if `HEAD` moved before the delete.
+- A worktree is offered only when `git status` is clean and every commit is also on a remote or on another local branch. Reclaim records the commit it verified, and skips the worktree if `HEAD` moved before the delete. Its submodules count too: their repositories live inside the worktree's git folder and go with it, so a submodule with uncommitted or untracked files, a stash, or a commit no remote has blocks the worktree.
 - Claude Code session transcripts count as activity, so a checkout an agent used an hour ago is not idle.
 - Before deleting a folder Reclaim renames it. Windows refuses the rename when any program has a file open inside, and Reclaim then leaves the folder alone.
 - Reclaim never enters `Windows`, `Program Files`, `Program Files (x86)` or `ProgramData`. Under a user profile it leaves `AppData` and dot-folders such as `.vscode` alone, except for git worktrees inside them.
@@ -135,6 +135,7 @@ Known limits:
 
 - Windows only.
 - Folders the current user cannot read are counted as unreadable and skipped.
+- Git removes a worktree with submodules only when forced, which skips git's own clean check. Reclaim runs its check right before, but the two are not one atomic step.
 - Activity detection knows Claude Code sessions. Other agents count only through their running processes and file edits.
 
 ## License
